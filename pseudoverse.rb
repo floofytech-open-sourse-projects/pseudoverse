@@ -1,573 +1,458 @@
-# pseudoverse.rb
+# ============================
+# Pseudoverse Engine
+# 2P Co-op + Downed/Revive
+# AI Enemies + Combat + Eating
+# Animations + JSON Saves (14 slots)
+# ============================
+
 require "io/console"
 require "json"
 
-GRID = 10
-MAX_HEALTH = 7
-SAVE_SLOTS = 14
-SAVE_PREFIX = "pseudoverse_save_"
+WIDTH  = 20
+HEIGHT = 10
 
-class Entity
-  attr_accessor :x, :y, :symbol
+PLAYER1 = "@1"
+PLAYER2 = "@2"
+DOG     = "&"
+ENEMY   = "E"
+FOOD    = "{]"
+WALL    = "#"
+FLOOR   = "."
 
-  def initialize(x, y, symbol)
-    @x = x
-    @y = y
-    @symbol = symbol
-  end
+SAVE_SLOTS  = 14
+SAVE_PREFIX = "save_slot_"
 
-  def to_h
-    { "x" => @x, "y" => @y, "symbol" => @symbol }
-  end
+# ----------------------------
+# World
+# ----------------------------
 
-  def self.from_h(h)
-    Entity.new(h["x"], h["y"], h["symbol"])
+def make_world
+  Array.new(HEIGHT) do |y|
+    Array.new(WIDTH) do |x|
+      if y == 0 || y == HEIGHT - 1 || x == 0 || x == WIDTH - 1
+        WALL
+      else
+        FLOOR
+      end
+    end
   end
 end
 
-class World
-  attr_accessor :player1, :player2, :npcs, :dogs, :food, :enemies,
-                :grid, :health1, :health2, :alive1, :alive2, :coop_mode
+# ----------------------------
+# Entities
+# ----------------------------
 
-  def initialize(coop_mode)
-    @coop_mode = coop_mode
-    @health1 = MAX_HEALTH
-    @health2 = MAX_HEALTH
-    @alive1 = true
-    @alive2 = coop_mode ? true : false
-    regen_world
-  end
+Entity = Struct.new(:x, :y, :glyph, :alive)
 
-  # ============================================================
-  # SAVE / LOAD SYSTEM (14 SLOTS)
-  # ============================================================
-  def save_to_slot(slot)
-    data = {
-      "coop_mode" => @coop_mode,
-      "health1" => @health1,
-      "health2" => @health2,
-      "alive1" => @alive1,
-      "alive2" => @alive2,
-      "player1" => @player1&.to_h,
-      "player2" => @player2&.to_h,
-      "npcs" => @npcs.map(&:to_h),
-      "dogs" => @dogs.map(&:to_h),
-      "food" => @food.map(&:to_h),
-      "enemies" => @enemies.map(&:to_h)
-    }
-    File.write("#{SAVE_PREFIX}#{slot}.json", JSON.pretty_generate(data))
-  end
+def spawn_entities
+  [
+    Entity.new(3, 3, DOG,   true),
+    Entity.new(10, 4, ENEMY, true),
+    Entity.new(7, 7, FOOD,  true)
+  ]
+end
 
-  def load_from_slot(slot)
-    file = "#{SAVE_PREFIX}#{slot}.json"
-    return unless File.exist?(file)
+# ----------------------------
+# Rendering helpers
+# ----------------------------
 
-    data = JSON.parse(File.read(file))
-
-    @coop_mode = data["coop_mode"]
-    @health1 = data["health1"]
-    @health2 = data["health2"]
-    @alive1 = data["alive1"]
-    @alive2 = data["alive2"]
-    @player1 = data["player1"] ? Entity.from_h(data["player1"]) : nil
-    @player2 = if @coop_mode && data["player2"]
-                 Entity.from_h(data["player2"])
-               else
-                 nil
-               end
-    @npcs = data["npcs"].map { |h| Entity.from_h(h) }
-    @dogs = data["dogs"].map { |h| Entity.from_h(h) }
-    @food = data["food"].map { |h| Entity.from_h(h) }
-    @enemies = data["enemies"].map { |h| Entity.from_h(h) }
-  end
-
-  def save_game_menu
-    system("clear") || system("cls")
-    puts "=== SAVE GAME ==="
-    (1..SAVE_SLOTS).each { |i| puts "#{i}) Save Slot #{i}" }
-    puts "15) Cancel"
-    print "> "
-
-    choice = STDIN.getch.to_i
-    return if choice < 1 || choice > SAVE_SLOTS
-
-    save_to_slot(choice)
-    puts "\nSaved to slot #{choice}!"
-    sleep 1
-  end
-
-  def load_game_menu
-    system("clear") || system("cls")
-    puts "=== LOAD GAME ==="
-    (1..SAVE_SLOTS).each do |i|
-      exists = File.exist?("#{SAVE_PREFIX}#{i}.json")
-      status = exists ? "(USED)" : "(EMPTY)"
-      puts "#{i}) Slot #{i} #{status}"
-    end
-    puts "15) Cancel"
-    print "> "
-
-    choice = STDIN.getch.to_i
-    return if choice < 1 || choice > SAVE_SLOTS
-
-    load_from_slot(choice)
-    puts "\nLoaded slot #{choice}!"
-    sleep 1
-  end
-
-  def esc_menu
-    system("clear") || system("cls")
-    puts "=== PSEUDOVERSE MENU ==="
-    puts "1) Save Game"
-    puts "2) Load Game"
-    puts "3) Cancel"
-    print "> "
-
-    choice = STDIN.getch
-    case choice
-    when "1" then save_game_menu
-    when "2" then load_game_menu
+def build_buffer(world)
+  Array.new(HEIGHT) do |y|
+    Array.new(WIDTH) do |x|
+      world[y][x]
     end
   end
+end
 
-  # ============================================================
-  # WORLD GENERATION
-  # ============================================================
-  def regen_world
-    @grid = Array.new(GRID) { Array.new(GRID, ".") }
+def draw_players_into_buffer(buffer, p1, p2)
+  buffer[p1[:y]][p1[:x]] = p1[:downed] ? "^" : PLAYER1
+  buffer[p2[:y]][p2[:x]] = p2[:downed] ? "^" : PLAYER2
+end
 
-    (0...GRID).each do |i|
-      @grid[0][i] = "#"
-      @grid[GRID-1][i] = "#"
-      @grid[i][0] = "#"
-      @grid[i][GRID-1] = "#"
-    end
+# ----------------------------
+# Startup animation
+# ----------------------------
 
-    door_side = rand(4)
-    case door_side
-    when 0 then @grid[0][rand(1..8)] = "[*]"
-    when 1 then @grid[GRID-1][rand(1..8)] = "[*]"
-    when 2 then @grid[rand(1..8)][0] = "[*]"
-    when 3 then @grid[rand(1..8)][GRID-1] = "[*]"
-    end
+def startup_animation(world, entities, p1, p2)
+  buffer = Array.new(HEIGHT) { Array.new(WIDTH, " ") }
 
-    @player1 = Entity.new(5, 5, "@1")
-    if @coop_mode
-      @player2 = Entity.new(4, 5, "@2")
-      @alive2 = true
-      @health2 = MAX_HEALTH
-    else
-      @player2 = nil
-      @alive2 = false
-    end
+  (0...HEIGHT).each do |y|
+    (0...WIDTH).each do |x|
+      buffer[y][x] = world[y][x]
 
-    @alive1 = true
-    @health1 = MAX_HEALTH
+      entities.each { |e| buffer[e.y][e.x] = e.glyph if e.alive }
 
-    @npcs = [
-      Entity.new(rand(1..8), rand(1..8), "$"),
-      Entity.new(rand(1..8), rand(1..8), "$")
-    ]
+      draw_players_into_buffer(buffer, p1, p2)
 
-    @dogs = [
-      Entity.new(rand(1..8), rand(1..8), "&"),
-      Entity.new(rand(1..8), rand(1..8), "&")
-    ]
-
-    @food = [
-      Entity.new(rand(1..8), rand(1..8), "{]"),
-      Entity.new(rand(1..8), rand(1..8), "{]")
-    ]
-
-    @enemies = [
-      Entity.new(rand(1..8), rand(1..8), "\\"),
-      Entity.new(rand(1..8), rand(1..8), "\\")
-    ]
-  end
-
-  # ============================================================
-  # HEALTH BARS
-  # ============================================================
-  def health_bar(hp)
-    bar = ""
-    (0...MAX_HEALTH).each do |i|
-      if i < MAX_HEALTH - hp
-        bar << "/"
-      else
-        bar << "="
-      end
-    end
-    bar
-  end
-
-  def render_health
-    if @alive1
-      puts "\nP1: #{health_bar(@health1)}"
-    else
-      puts "\nP1: DEAD"
-    end
-
-    if @coop_mode
-      if @alive2
-        puts "P2: #{health_bar(@health2)}"
-      else
-        puts "P2: DEAD"
-      end
-    end
-  end
-
-  # ============================================================
-  # EAT FOOD
-  # ============================================================
-  def eat_food(player_number)
-    case player_number
-    when 1
-      return unless @alive1
-      eater = @player1
-      return unless eater
-      eaten = @food.find { |f| f.x == eater.x && f.y == eater.y }
-      return unless eaten
-      @health1 += 1 if @health1 < MAX_HEALTH
-      @food.delete(eaten)
-    when 2
-      return unless @coop_mode && @alive2
-      eater = @player2
-      return unless eater
-      eaten = @food.find { |f| f.x == eater.x && f.y == eater.y }
-      return unless eaten
-      @health2 += 1 if @health2 < MAX_HEALTH
-      @food.delete(eaten)
-    end
-  end
-
-  # ============================================================
-  # LINE-BY-LINE DRAW
-  # ============================================================
-  def draw_line_by_line
-    system("clear") || system("cls")
-
-    temp = Marshal.load(Marshal.dump(@grid))
-    temp[@player1.y][@player1.x] = "@1" if @alive1 && @player1
-    if @coop_mode && @alive2 && @player2
-      temp[@player2.y][@player2.x] = "@2"
-    end
-    @npcs.each { |n| temp[n.y][n.x] = "$" }
-    @dogs.each { |d| temp[d.y][d.x] = "&" }
-    @food.each { |f| temp[f.y][f.x] = "{]" }
-    @enemies.each { |e| temp[e.y][e.x] = "\\" }
-
-    temp.each do |row|
-      puts row.map { |c| c.to_s.ljust(3) }.join
-      sleep 0.05
-    end
-
-    render_health
-  end
-
-  # ============================================================
-  # STARTUP SCREEN
-  # ============================================================
-  def render_startup
-    system("clear") || system("cls")
-    puts "WELLCOME TO THE PSEUDOVERSE"
-    sleep 1.5
-    draw_line_by_line
-  end
-
-  # ============================================================
-  # NORMAL RENDER
-  # ============================================================
-  def render
-    temp = Marshal.load(Marshal.dump(@grid))
-    temp[@player1.y][@player1.x] = "@1" if @alive1 && @player1
-    if @coop_mode && @alive2 && @player2
-      temp[@player2.y][@player2.x] = "@2"
-    end
-    @npcs.each { |n| temp[n.y][n.x] = "$" }
-    @dogs.each { |d| temp[d.y][d.x] = "&" }
-    @food.each { |f| temp[f.y][f.x] = "{]" }
-    @enemies.each { |e| temp[e.y][e.x] = "\\" }
-
-    system("clear") || system("cls")
-    temp.each { |row| puts row.map { |c| c.to_s.ljust(3) }.join }
-    render_health
-  end
-
-  # ============================================================
-  # COMBAT
-  # ============================================================
-  def attack(player_number)
-    case player_number
-    when 1
-      return unless @alive1 && @player1
-      px = @player1.x
-      py = @player1.y
-    when 2
-      return unless @coop_mode && @alive2 && @player2
-      px = @player2.x
-      py = @player2.y
-    else
-      return
-    end
-
-    @enemies.delete_if do |e|
-      (e.x == px && (e.y - py).abs == 1) ||
-      (e.y == py && (e.x - px).abs == 1)
-    end
-  end
-
-  # ============================================================
-  # DAMAGE
-  # ============================================================
-  def damage_player(num)
-    case num
-    when 1
-      return unless @alive1
-      @health1 -= 1 if @health1 > 0
-      if @health1 <= 0
-        @alive1 = false
-        player_death_sequence(1)
-      end
-    when 2
-      return unless @coop_mode && @alive2
-      @health2 -= 1 if @health2 > 0
-      if @health2 <= 0
-        @alive2 = false
-        player_death_sequence(2)
-      end
-    end
-  end
-
-  # ============================================================
-  # MOVEMENT + WORLD REGEN
-  # ============================================================
-  def move_player(num, dx, dy)
-    case num
-    when 1
-      return unless @alive1 && @player1
-      actor = @player1
-    when 2
-      return unless @coop_mode && @alive2 && @player2
-      actor = @player2
-    else
-      return
-    end
-
-    new_x = actor.x + dx
-    new_y = actor.y + dy
-
-    if new_x < 0 || new_x >= GRID || new_y < 0 || new_y >= GRID
-      regen_world
-      draw_line_by_line
-      return
-    end
-
-    return if @grid[new_y][new_x] == "#"
-
-    if @grid[new_y][new_x] == "[*]"
-      regen_world
-      draw_line_by_line
-      return
-    end
-
-    actor.x = new_x
-    actor.y = new_y
-  end
-
-  # ============================================================
-  # REVIVE
-  # ============================================================
-  def revive(player_number)
-    case player_number
-    when 1
-      return unless @coop_mode && @alive1 && !@alive2 && @player1 && @player2
-      # P1 tries to revive P2: must be adjacent to P2's last position
-      if adjacent?(@player1.x, @player1.y, @player2.x, @player2.y)
-        @alive2 = true
-        @health2 = [MAX_HEALTH / 2, 1].max
-      end
-    when 2
-      return unless @coop_mode && @alive2 && !@alive1 && @player1 && @player2
-      # P2 tries to revive P1
-      if adjacent?(@player2.x, @player2.y, @player1.x, @player1.y)
-        @alive1 = true
-        @health1 = [MAX_HEALTH / 2, 1].max
-      end
-    end
-  end
-
-  def adjacent?(x1, y1, x2, y2)
-    (x1 == x2 && (y1 - y2).abs == 1) ||
-    (y1 == y2 && (x1 - x2).abs == 1)
-  end
-
-  # ============================================================
-  # AI
-  # ============================================================
-  def update_npcs
-    @npcs.each do |n|
-      dx = [-1, 0, 1].sample
-      dy = [-1, 0, 1].sample
-      nx = n.x + dx
-      ny = n.y + dy
-      next if nx < 1 || nx > 8 || ny < 1 || ny > 8
-      next if @grid[ny][nx] == "#"
-      n.x = nx
-      n.y = ny
-    end
-  end
-
-  def update_dogs
-    @dogs.each do |d|
-      target = if @coop_mode && @alive2 && @player2
-                 # maybe follow P1 more, but for now follow P1
-                 @player1
-               else
-                 @player1
-               end
-      dx = target.x <=> d.x
-      dy = target.y <=> d.y
-      nx = d.x + dx
-      ny = d.y + dy
-      next if nx < 1 || nx > 8 || ny < 1 || ny > 8
-      next if @grid[ny][nx] == "#"
-      d.x = nx
-      d.y = ny
-    end
-  end
-
-  def update_enemies
-    @enemies.each do |e|
-      # choose nearest alive player as target
-      targets = []
-      targets << [@player1, 1] if @alive1 && @player1
-      targets << [@player2, 2] if @coop_mode && @alive2 && @player2
-      next if targets.empty?
-
-      target, tnum = targets.min_by { |(pl, _)| (pl.x - e.x).abs + (pl.y - e.y).abs }
-
-      dx = target.x <=> e.x
-      dy = target.y <=> e.y
-      nx = e.x + dx
-      ny = e.y + dy
-
-      if nx == target.x && ny == target.y
-        damage_player(tnum)
-      end
-
-      next if nx < 1 || nx > 8 || ny < 1 || ny > 8
-      next if @grid[ny][nx] == "#"
-      e.x = nx
-      e.y = ny
-    end
-  end
-
-  # ============================================================
-  # PLAYER-SPECIFIC DEATH SEQUENCE
-  # ============================================================
-  def player_death_sequence(num)
-    system("clear") || system("cls")
-    who = num == 1 ? "PLAYER 1" : "PLAYER 2"
-    puts "#{who} HAS FALLEN..."
-    sleep 1
-
-    lines = Array.new(5) { "#{who} FADES FROM THIS WORLD..." }
-
-    until lines.all? { |l| l.strip.empty? }
       system("clear") || system("cls")
-      lines.map! do |line|
-        chars = line.chars
-        rand(3..6).times do
-          idx = rand(chars.length)
-          chars[idx] = " " unless chars[idx] == " "
-        end
-        chars.join
-      end
-      lines.each { |l| puts l }
-      sleep 0.05
+      buffer.each { |row| puts row.join }
+      sleep 0.01
+    end
+  end
+end
+
+# ----------------------------
+# Death animation
+# ----------------------------
+
+def death_animation(world, entities, p1, p2)
+  buffer = build_buffer(world)
+
+  entities.each { |e| buffer[e.y][e.x] = e.glyph if e.alive }
+
+  draw_players_into_buffer(buffer, p1, p2)
+
+  (HEIGHT - 1).downto(0) do |y|
+    (WIDTH - 1).downto(0) do |x|
+      buffer[y][x] = " "
+      system("clear") || system("cls")
+      buffer.each { |row| puts row.join }
+      sleep 0.01
+    end
+  end
+
+  system("clear") || system("cls")
+  puts "HERE WE MOURN THE DEATH OF A HERO"
+  sleep 2
+end
+
+# ----------------------------
+# Rendering
+# ----------------------------
+
+def render(world, p1, p2, entities)
+  system("clear") || system("cls")
+
+  buffer = build_buffer(world)
+
+  entities.each { |e| buffer[e.y][e.x] = e.glyph if e.alive }
+
+  draw_players_into_buffer(buffer, p1, p2)
+
+  buffer.each { |row| puts row.join }
+
+  puts
+  puts "P1 HP: #{p1[:hp]}   P2 HP: #{p2[:hp]}"
+  puts "P1: WASD move, SPACE attack, E eat, Q revive"
+  puts "P2: Arrows move, P attack, I eat, O revive"
+  puts "ESC: Save/Load menu | X: quit"
+end
+
+# ----------------------------
+# Input
+# ----------------------------
+
+def read_key
+  STDIN.echo = false
+  STDIN.raw!
+  c1 = STDIN.getc.chr
+
+  if c1 == "\e"
+    c2 = STDIN.getc.chr rescue nil
+    c3 = STDIN.getc.chr rescue nil
+    key = c1 + (c2 || "") + (c3 || "")
+  else
+    key = c1
+  end
+ensure
+  STDIN.echo = true
+  STDIN.cooked!
+  return key
+end
+
+# ----------------------------
+# Collision helpers
+# ----------------------------
+
+def walkable?(world, x, y)
+  world[y][x] != WALL
+end
+
+def entity_at(entities, x, y)
+  entities.find { |e| e.alive && e.x == x && e.y == y }
+end
+
+def entity_blocking?(entities, x, y)
+  e = entity_at(entities, x, y)
+  return false if e.nil?
+  return false if e.glyph == FOOD
+  true
+end
+
+# ----------------------------
+# Combat
+# ----------------------------
+
+def adjacent_enemy(entities, p)
+  entities.find do |e|
+    e.alive &&
+    e.glyph == ENEMY &&
+    ((e.x - p[:x]).abs + (e.y - p[:y]).abs == 1)
+  end
+end
+
+def player_attack(p, entities)
+  enemy = adjacent_enemy(entities, p)
+  return unless enemy
+  enemy.alive = false
+end
+
+# ----------------------------
+# Eating
+# ----------------------------
+
+def adjacent_food(entities, p)
+  entities.find do |e|
+    e.alive &&
+    e.glyph == FOOD &&
+    ((e.x - p[:x]).abs + (e.y - p[:y]).abs == 1)
+  end
+end
+
+def player_eat(p, entities)
+  food = adjacent_food(entities, p)
+  return unless food
+  p[:hp] += 2
+  food.alive = false
+end
+
+# ----------------------------
+# Distance
+# ----------------------------
+
+def manhattan(a, b)
+  (a[:x] - b[:x]).abs + (a[:y] - b[:y]).abs
+end
+
+# ----------------------------
+# Movement
+# ----------------------------
+
+def move_player(world, p, entities, dx, dy)
+  return false if p[:downed]
+
+  nx = p[:x] + dx
+  ny = p[:y] + dy
+
+  return false unless walkable?(world, nx, ny)
+
+  target = entity_at(entities, nx, ny)
+
+  case target&.glyph
+  when ENEMY
+    p[:hp] -= 1
+    return false
+  when FOOD
+    p[:hp] += 2
+    target.alive = false
+  when DOG
+    return false
+  end
+
+  return false if entity_blocking?(entities, nx, ny)
+
+  p[:x] = nx
+  p[:y] = ny
+  true
+end
+
+# ----------------------------
+# Enemy AI
+# ----------------------------
+
+def move_enemies(world, entities, p1, p2)
+  enemies = entities.select { |e| e.alive && e.glyph == ENEMY }
+
+  enemies.each do |enemy|
+    enemy_hash = { x: enemy.x, y: enemy.y }
+
+    target = manhattan(enemy_hash, p1) <= manhattan(enemy_hash, p2) ? p1 : p2
+
+    dx = target[:x] < enemy.x ? -1 : target[:x] > enemy.x ? 1 : 0
+    dy = target[:y] < enemy.y ? -1 : target[:y] > enemy.y ? 1 : 0
+
+    nx = enemy.x + dx
+    ny = enemy.y + dy
+
+    next unless walkable?(world, nx, ny)
+
+    if nx == p1[:x] && ny == p1[:y]
+      p1[:hp] -= 1
+      next
+    elsif nx == p2[:x] && ny == p2[:y]
+      p2[:hp] -= 1
+      next
     end
 
-    system("clear") || system("cls")
-    puts "HERE WE MOURN THE DEATH OF A HEREO"
-    sleep 1.5
-  end
+    blocker = entity_at(entities, nx, ny)
+    next if blocker
 
-  # ============================================================
-  # TICK
-  # ============================================================
-  def tick
-    update_npcs
-    update_dogs
-    update_enemies
+    enemy.x = nx
+    enemy.y = ny
   end
 end
 
-# ============================================================
-# INPUT HANDLING (INCL. ARROWS)
-# ============================================================
-def read_key
-  ch1 = STDIN.getch
-  if ch1 == "\e"
-    ch2 = STDIN.getch rescue nil
-    ch3 = STDIN.getch rescue nil
-    seq = ch1 + (ch2 || "") + (ch3 || "")
-    return seq
-  else
-    ch1
+# ----------------------------
+# Save / Load
+# ----------------------------
+
+def save_game(slot, world, entities, p1, p2)
+  data = {
+    "world"    => world,
+    "entities" => entities.map { |e|
+      { "x" => e.x, "y" => e.y, "glyph" => e.glyph, "alive" => e.alive }
+    },
+    "player1"  => p1,
+    "player2"  => p2
+  }
+
+  File.write("#{SAVE_PREFIX}#{slot}.json", JSON.pretty_generate(data))
+end
+
+def load_game(slot)
+  file = "#{SAVE_PREFIX}#{slot}.json"
+  return nil unless File.exist?(file)
+
+  data = JSON.parse(File.read(file))
+
+  world = data["world"]
+
+  entities = data["entities"].map do |h|
+    Entity.new(h["x"], h["y"], h["glyph"], h["alive"])
+  end
+
+  p1 = data["player1"].transform_keys(&:to_sym)
+  p2 = data["player2"].transform_keys(&:to_sym)
+
+  [world, entities, p1, p2]
+end
+
+def save_menu(world, entities, p1, p2)
+  system("clear") || system("cls")
+  puts "=== SAVE GAME ==="
+  (1..SAVE_SLOTS).each { |i| puts "#{i}) Save Slot #{i}" }
+  puts "#{SAVE_SLOTS + 1}) Cancel"
+  print "> "
+  choice = STDIN.gets.to_i
+  return if choice < 1 || choice > SAVE_SLOTS
+  save_game(choice, world, entities, p1, p2)
+end
+
+def load_menu
+  system("clear") || system("cls")
+  puts "=== LOAD GAME ==="
+  (1..SAVE_SLOTS).each do |i|
+    exists = File.exist?("#{SAVE_PREFIX}#{i}.json")
+    puts "#{i}) Slot #{i} #{exists ? "(USED)" : "(EMPTY)"}"
+  end
+  puts "#{SAVE_SLOTS + 1}) Cancel"
+  print "> "
+  choice = STDIN.gets.to_i
+  return nil if choice < 1 || choice > SAVE_SLOTS
+  load_game(choice)
+end
+
+def save_load_menu(world, entities, p1, p2)
+  system("clear") || system("cls")
+  puts "=== SAVE / LOAD MENU ==="
+  puts "1) Save Game"
+  puts "2) Load Game"
+  puts "3) Cancel"
+  print "> "
+  choice = STDIN.gets.to_i
+
+  case choice
+  when 1 then save_menu(world, entities, p1, p2); :save
+  when 2 then :load
+  else :cancel
   end
 end
 
-# ============================================================
-# MODE SELECT
-# ============================================================
-system("clear") || system("cls")
-puts "PSEUDOVERSE MODE SELECT"
-puts "1) Single Player"
-puts "2) Co-Op (2 players)"
-print "> "
-mode_choice = STDIN.getch
-coop_mode = (mode_choice == "2")
+# ----------------------------
+# Game setup
+# ----------------------------
 
-world = World.new(coop_mode)
-world.render_startup
+world    = make_world
+entities = spawn_entities
+player1  = { x: 2, y: 2, hp: 10, downed: false }
+player2  = { x: 4, y: 4, hp: 10, downed: false }
 
-loop do
-  print "P1: WASD/E/Q SPACE   "
-  print "P2: ARROWS/I/P O" if coop_mode
-  print "   ESC: Menu\n"
+startup_animation(world, entities, player1, player2)
 
-  input = read_key
+# ----------------------------
+# Game loop
+# ----------------------------
 
-  case input
-  when "\e" # ESC
-    world.esc_menu
+running = true
 
-  # ---------- PLAYER 1 CONTROLS ----------
-  when "w" then world.move_player(1, 0, -1)
-  when "s" then world.move_player(1, 0, 1)
-  when "a" then world.move_player(1, -1, 0)
-  when "d" then world.move_player(1, 1, 0)
-  when " " then world.attack(1)
-  when "e", "E" then world.eat_food(1)
-  when "q", "Q" then world.revive(1)
+while running
+  render(world, player1, player2, entities)
 
-  # ---------- PLAYER 2 CONTROLS (ARROWS / I / O / P) ----------
-  when "\e[A" # up arrow
-    world.move_player(2, 0, -1) if coop_mode
-  when "\e[B" # down arrow
-    world.move_player(2, 0, 1) if coop_mode
-  when "\e[D" # left arrow
-    world.move_player(2, -1, 0) if coop_mode
-  when "\e[C" # right arrow
-    world.move_player(2, 1, 0) if coop_mode
-  when "o", "O"
-    world.attack(2) if coop_mode
-  when "i", "I"
-    world.eat_food(2) if coop_mode
-  when "p", "P"
-    world.revive(2) if coop_mode
+  key = read_key
+  moved = false
+
+  case key
+  # Player 1 movement
+  when "w" then moved = move_player(world, player1, entities, 0, -1) unless player1[:downed]
+  when "s" then moved = move_player(world, player1, entities, 0, 1)  unless player1[:downed]
+  when "a" then moved = move_player(world, player1, entities, -1, 0) unless player1[:downed]
+  when "d" then moved = move_player(world, player1, entities, 1, 0)  unless player1[:downed]
+
+  # Player 2 movement
+  when "\e[A" then moved = move_player(world, player2, entities, 0, -1) unless player2[:downed]
+  when "\e[B" then moved = move_player(world, player2, entities, 0, 1)  unless player2[:downed]
+  when "\e[D" then moved = move_player(world, player2, entities, -1, 0) unless player2[:downed]
+  when "\e[C" then moved = move_player(world, player2, entities, 1, 0)  unless player2[:downed]
+
+  # Attacks
+  when " " then player_attack(player1, entities) unless player1[:downed]
+  when "p" then player_attack(player2, entities) unless player2[:downed]
+
+  # Eating
+  when "e" then player_eat(player1, entities) unless player1[:downed]
+  when "i" then player_eat(player2, entities) unless player2[:downed]
+
+  # Revive
+  when "q"
+    if !player1[:downed] && player2[:downed]
+      player2[:downed] = false
+      player2[:hp] = 5
+    else
+      running = false
+    end
+
+  when "o"
+    if !player2[:downed] && player1[:downed]
+      player1[:downed] = false
+      player1[:hp] = 5
+    end
+
+  # Save/Load
+  when "\e"
+    choice = save_load_menu(world, entities, player1, player2)
+    if choice == :load
+      loaded = load_menu
+      if loaded
+        world, entities, player1, player2 = loaded
+      end
+    end
+
+  # Quit
+  when "x"
+    running = false
   end
 
-  world.tick
-  world.render
+  move_enemies(world, entities, player1, player2) if moved
+
+  # Downed logic
+  player1[:downed] = true if player1[:hp] <= 0 && !player1[:downed]
+  player2[:downed] = true if player2[:hp] <= 0 && !player2[:downed]
+
+  # Full death
+  if player1[:downed] && player2[:downed]
+    death_animation(world, entities, player1, player2)
+    running = false
+  end
 end
+
+puts "You have left the Pseudoverse."
