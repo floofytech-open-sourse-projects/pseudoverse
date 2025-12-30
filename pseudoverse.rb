@@ -3,7 +3,7 @@
 # Infinite World • Solo / Co‑op • Downed/Revive
 # Enemy AI • Eating • Combat • JSON Saves
 # Friendly Fire • Clean Input Handling • ESC Fix
-# Co‑op Save Labeling
+# Co‑op Save Labeling • Random Worldgen + Spawns
 # ============================
 
 require "io/console"
@@ -53,11 +53,18 @@ def title_screen
 end
 
 # ----------------------------
-# World generation
+# World generation (random walls)
 # ----------------------------
 
 def make_world
-  Array.new(HEIGHT) { Array.new(WIDTH) { FLOOR } }
+  # 80% floor, 20% walls
+  tiles = [FLOOR, FLOOR, FLOOR, FLOOR, WALL]
+
+  Array.new(HEIGHT) do
+    Array.new(WIDTH) do
+      tiles.sample
+    end
+  end
 end
 
 # ----------------------------
@@ -67,11 +74,22 @@ end
 Entity = Struct.new(:x, :y, :glyph, :alive)
 
 def spawn_entities
-  [
-    Entity.new(3, 3,  DOG,   true),
-    Entity.new(10, 4, ENEMY, true),
-    Entity.new(7, 7,  FOOD,  true)
-  ]
+  entities = []
+
+  # Dog: 1 random position
+  entities << Entity.new(rand(WIDTH), rand(HEIGHT), DOG, true)
+
+  # Enemies: 3–6 random
+  rand(3..6).times do
+    entities << Entity.new(rand(WIDTH), rand(HEIGHT), ENEMY, true)
+  end
+
+  # Food: 2–4 random
+  rand(2..4).times do
+    entities << Entity.new(rand(WIDTH), rand(HEIGHT), FOOD, true)
+  end
+
+  entities
 end
 
 # ----------------------------
@@ -254,7 +272,12 @@ def move_enemies(world, entities, p1, p2)
   enemies = entities.select { |e| e.alive && e.glyph == ENEMY }
 
   enemies.each do |enemy|
-    target = SINGLE_PLAYER ? p1 : (manhattan(enemy, p1) <= manhattan(enemy, p2) ? p1 : p2)
+    enemy_hash = { x: enemy.x, y: enemy.y }
+    target = if SINGLE_PLAYER
+               p1
+             else
+               manhattan(enemy_hash, p1) <= manhattan(enemy_hash, p2) ? p1 : p2
+             end
 
     dx = target[:x] < enemy.x ? -1 : target[:x] > enemy.x ? 1 : 0
     dy = target[:y] < enemy.y ? -1 : target[:y] > enemy.y ? 1 : 0
