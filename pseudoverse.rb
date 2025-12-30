@@ -3,6 +3,7 @@
 # Infinite World • Solo / Co‑op • Downed/Revive
 # Enemy AI • Eating • Combat • JSON Saves
 # Friendly Fire • Clean Input Handling • ESC Fix
+# Co‑op Save Labeling
 # ============================
 
 require "io/console"
@@ -22,11 +23,10 @@ FLOOR   = "."
 SAVE_SLOTS  = 14
 SAVE_PREFIX = "save_slot_"
 
-# This will be set by the main menu (solo vs co‑op)
 SINGLE_PLAYER = false
 
 # ----------------------------
-# Title screen and main menu
+# Title screen
 # ----------------------------
 
 def title_screen
@@ -57,10 +57,7 @@ end
 # ----------------------------
 
 def make_world
-  # Fully open world — no border walls.
-  Array.new(HEIGHT) do
-    Array.new(WIDTH) { FLOOR }
-  end
+  Array.new(HEIGHT) { Array.new(WIDTH) { FLOOR } }
 end
 
 # ----------------------------
@@ -82,11 +79,7 @@ end
 # ----------------------------
 
 def build_buffer(world)
-  Array.new(HEIGHT) do |y|
-    Array.new(WIDTH) do |x|
-      world[y][x]
-    end
-  end
+  Array.new(HEIGHT) { |y| Array.new(WIDTH) { |x| world[y][x] } }
 end
 
 def draw_players_into_buffer(buffer, p1, p2)
@@ -106,9 +99,7 @@ def startup_animation(world, entities, p1, p2)
   (0...HEIGHT).each do |y|
     (0...WIDTH).each do |x|
       buffer[y][x] = world[y][x]
-
       entities.each { |e| buffer[e.y][e.x] = e.glyph if e.alive }
-
       draw_players_into_buffer(buffer, p1, p2)
 
       system("clear") || system("cls")
@@ -124,9 +115,7 @@ end
 
 def death_animation(world, entities, p1, p2)
   buffer = build_buffer(world)
-
   entities.each { |e| buffer[e.y][e.x] = e.glyph if e.alive }
-
   draw_players_into_buffer(buffer, p1, p2)
 
   (HEIGHT - 1).downto(0) do |y|
@@ -172,7 +161,7 @@ def render(world, p1, p2, entities)
 end
 
 # ----------------------------
-# Input (with ESC vs arrows fix)
+# Input (ESC fix)
 # ----------------------------
 
 def read_key
@@ -181,46 +170,29 @@ def read_key
 
   c1 = STDIN.getc
 
-  if c1 == "\e"  # Escape prefix or ESC key
-    # Wait briefly to see if this is an escape sequence (arrow keys)
+  if c1 == "\e"
     if IO.select([STDIN], nil, nil, 0.01)
       c2 = STDIN.getc
       if IO.select([STDIN], nil, nil, 0.001)
         c3 = STDIN.getc
-        return c1 + c2 + c3   # Likely arrow key: "\e[A", "\e[B", etc.
+        return c1 + c2 + c3
       else
-        return c1 + c2        # Rare 2-byte escape sequence
+        return c1 + c2
       end
     else
-      return "\e"             # Bare ESC key
+      return "\e"
     end
-  else
-    return c1
   end
+
+  c1
 ensure
   STDIN.echo = true
   STDIN.cooked!
 end
 
 # ----------------------------
-# Utility / collision
+# Utility
 # ----------------------------
-
-def walkable?(world, x, y)
-  # No tile-based blocking; only entities would block if we wanted them to.
-  true
-end
-
-def entity_at(entities, x, y)
-  entities.find { |e| e.alive && e.x == x && e.y == y }
-end
-
-def entity_blocking?(entities, x, y)
-  e = entity_at(entities, x, y)
-  return false if e.nil?
-  return false if e.glyph == FOOD
-  true
-end
 
 def manhattan(a, b)
   (a[:x] - b[:x]).abs + (a[:y] - b[:y]).abs
@@ -235,35 +207,25 @@ end
 # ----------------------------
 
 def adjacent_enemy(entities, p)
-  entities.find do |e|
-    e.alive &&
-    e.glyph == ENEMY &&
-    ((e.x - p[:x]).abs + (e.y - p[:y]).abs == 1)
-  end
+  entities.find { |e| e.alive && e.glyph == ENEMY && (e.x - p[:x]).abs + (e.y - p[:y]).abs == 1 }
 end
 
-def adjacent_player?(attacker, other)
-  return false if other.nil?
-  (attacker[:x] - other[:x]).abs + (attacker[:y] - other[:y]).abs == 1
+def adjacent_player?(a, b)
+  return false if b.nil?
+  (a[:x] - b[:x]).abs + (a[:y] - b[:y]).abs == 1
 end
 
 def player_attack(p, entities, other_player = nil)
-  # Hit enemy if adjacent
   enemy = adjacent_enemy(entities, p)
   enemy.alive = false if enemy
 
-  # Friendly fire: 1 damage if adjacent
   if other_player && adjacent_player?(p, other_player)
     other_player[:hp] -= 1
   end
 end
 
 def adjacent_food(entities, p)
-  entities.find do |e|
-    e.alive &&
-    e.glyph == FOOD &&
-    ((e.x - p[:x]).abs + (e.y - p[:y]).abs == 1)
-  end
+  entities.find { |e| e.alive && e.glyph == FOOD && (e.x - p[:x]).abs + (e.y - p[:y]).abs == 1 }
 end
 
 def player_eat(p, entities)
@@ -279,13 +241,8 @@ end
 
 def move_player(world, p, entities, dx, dy)
   return false if p[:downed]
-
-  nx = p[:x] + dx
-  ny = p[:y] + dy
-
-  # Allow leaving grid; no wall collisions at edges.
-  p[:x] = nx
-  p[:y] = ny
+  p[:x] += dx
+  p[:y] += dy
   true
 end
 
@@ -297,14 +254,7 @@ def move_enemies(world, entities, p1, p2)
   enemies = entities.select { |e| e.alive && e.glyph == ENEMY }
 
   enemies.each do |enemy|
-    enemy_hash = { x: enemy.x, y: enemy.y }
-
-    target =
-      if SINGLE_PLAYER
-        p1
-      else
-        manhattan(enemy_hash, p1) <= manhattan(enemy_hash, p2) ? p1 : p2
-      end
+    target = SINGLE_PLAYER ? p1 : (manhattan(enemy, p1) <= manhattan(enemy, p2) ? p1 : p2)
 
     dx = target[:x] < enemy.x ? -1 : target[:x] > enemy.x ? 1 : 0
     dy = target[:y] < enemy.y ? -1 : target[:y] > enemy.y ? 1 : 0
@@ -312,13 +262,8 @@ def move_enemies(world, entities, p1, p2)
     enemy.x += dx
     enemy.y += dy
 
-    if enemy.x == p1[:x] && enemy.y == p1[:y]
-      p1[:hp] -= 1
-    end
-
-    if !SINGLE_PLAYER && enemy.x == p2[:x] && enemy.y == p2[:y]
-      p2[:hp] -= 1
-    end
+    p1[:hp] -= 1 if enemy.x == p1[:x] && enemy.y == p1[:y]
+    p2[:hp] -= 1 if !SINGLE_PLAYER && enemy.x == p2[:x] && enemy.y == p2[:y]
   end
 end
 
@@ -328,10 +273,8 @@ end
 
 def save_game(slot, world, entities, p1, p2)
   data = {
-    "world"    => world,
-    "entities" => entities.map { |e|
-      { "x" => e.x, "y" => e.y, "glyph" => e.glyph, "alive" => e.alive }
-    },
+    "world"         => world,
+    "entities"      => entities.map { |e| { "x" => e.x, "y" => e.y, "glyph" => e.glyph, "alive" => e.alive } },
     "player1"       => p1,
     "player2"       => p2,
     "single_player" => SINGLE_PLAYER
@@ -361,23 +304,32 @@ def save_menu(world, entities, p1, p2)
   (1..SAVE_SLOTS).each { |i| puts "#{i}) Save Slot #{i}" }
   puts "#{SAVE_SLOTS + 1}) Cancel"
   print "> "
-  choice = STDIN.gets.to_i
-  return if choice < 1 || choice > SAVE_SLOTS
-  save_game(choice, world, entities, p1, p2)
+  slot = STDIN.gets.to_i
+  return if slot < 1 || slot > SAVE_SLOTS
+  save_game(slot, world, entities, p1, p2)
 end
 
 def load_menu
   system("clear") || system("cls")
   puts "=== LOAD GAME ==="
+
   (1..SAVE_SLOTS).each do |i|
-    exists = File.exist?("#{SAVE_PREFIX}#{i}.json")
-    puts "#{i}) Slot #{i} #{exists ? "(USED)" : "(EMPTY)"}"
+    file = "#{SAVE_PREFIX}#{i}.json"
+
+    if File.exist?(file)
+      data = JSON.parse(File.read(file))
+      label = data["single_player"] ? "USED" : "USED CO-OP"
+      puts "#{i}) Slot #{i} (#{label})"
+    else
+      puts "#{i}) Slot #{i} (EMPTY)"
+    end
   end
+
   puts "#{SAVE_SLOTS + 1}) Cancel"
   print "> "
-  choice = STDIN.gets.to_i
-  return nil if choice < 1 || choice > SAVE_SLOTS
-  load_game(choice)
+  slot = STDIN.gets.to_i
+  return nil if slot < 1 || slot > SAVE_SLOTS
+  load_game(slot)
 end
 
 def save_load_menu(world, entities, p1, p2)
@@ -390,18 +342,14 @@ def save_load_menu(world, entities, p1, p2)
   choice = STDIN.gets.to_i
 
   case choice
-  when 1
-    save_menu(world, entities, p1, p2)
-    :save
-  when 2
-    :load
-  else
-    :cancel
+  when 1 then save_menu(world, entities, p1, p2); :save
+  when 2 then :load
+  else :cancel
   end
 end
 
 # ----------------------------
-# Game setup via main menu
+# Game setup
 # ----------------------------
 
 world    = nil
@@ -421,14 +369,11 @@ loop do
       Object.send(:remove_const, :SINGLE_PLAYER) rescue nil
       SINGLE_PLAYER = !!loaded_single
       break
-    else
-      next
     end
 
   when 2
     Object.send(:remove_const, :SINGLE_PLAYER) rescue nil
     SINGLE_PLAYER = true
-
     world    = make_world
     entities = spawn_entities
     player1  = { x: 2, y: 2, hp: 10, downed: false }
@@ -438,7 +383,6 @@ loop do
   when 3
     Object.send(:remove_const, :SINGLE_PLAYER) rescue nil
     SINGLE_PLAYER = false
-
     world    = make_world
     entities = spawn_entities
     player1  = { x: 2, y: 2, hp: 10, downed: false }
@@ -448,10 +392,6 @@ loop do
   when 4
     puts "Goodbye."
     exit
-
-  else
-    # invalid menu key, just loop again
-    next
   end
 end
 
@@ -470,31 +410,24 @@ while running
   moved = false
 
   case key
-  # Player 1 movement
   when "w" then moved = move_player(world, player1, entities, 0, -1)
   when "s" then moved = move_player(world, player1, entities, 0, 1)
   when "a" then moved = move_player(world, player1, entities, -1, 0)
   when "d" then moved = move_player(world, player1, entities, 1, 0)
 
-  # Player 2 movement (co‑op only)
   when "\e[A" then moved = move_player(world, player2, entities, 0, -1) unless SINGLE_PLAYER
   when "\e[B" then moved = move_player(world, player2, entities, 0, 1)  unless SINGLE_PLAYER
   when "\e[D" then moved = move_player(world, player2, entities, -1, 0) unless SINGLE_PLAYER
   when "\e[C" then moved = move_player(world, player2, entities, 1, 0)  unless SINGLE_PLAYER
 
-  # Attacks (with friendly fire in co‑op)
   when " "
     player_attack(player1, entities, SINGLE_PLAYER ? nil : player2)
   when "p"
     player_attack(player2, entities, player1) unless SINGLE_PLAYER
 
-  # Eating
-  when "e"
-    player_eat(player1, entities)
-  when "i"
-    player_eat(player2, entities) unless SINGLE_PLAYER
+  when "e" then player_eat(player1, entities)
+  when "i" then player_eat(player2, entities) unless SINGLE_PLAYER
 
-  # Revive
   when "q"
     if !SINGLE_PLAYER && !player1[:downed] && player2[:downed]
       player2[:downed] = false
@@ -507,7 +440,6 @@ while running
       player1[:hp] = 5
     end
 
-  # Save/Load menu (ESC key only)
   when "\e"
     choice = save_load_menu(world, entities, player1, player2)
     if choice == :load
@@ -519,41 +451,31 @@ while running
       end
     end
 
-  # Quit
   when "x"
     running = false
 
-  # Any other key: do nothing
   else
     # ignored
   end
 
   move_enemies(world, entities, player1, player2) if moved
 
-  # Downed logic
   player1[:downed] = true if player1[:hp] <= 0 && !player1[:downed]
-  if !SINGLE_PLAYER
-    player2[:downed] = true if player2[:hp] <= 0 && !player2[:downed]
-  end
+  player2[:downed] = true if !SINGLE_PLAYER && player2[:hp] <= 0 && !player2[:downed]
 
-  # Infinite world regeneration
   if out_of_bounds?(player1) || (!SINGLE_PLAYER && out_of_bounds?(player2))
     world    = make_world
     entities = spawn_entities
-
     player1[:x] = WIDTH / 2
     player1[:y] = HEIGHT / 2
-
     unless SINGLE_PLAYER
       player2[:x] = WIDTH / 2 + 1
       player2[:y] = HEIGHT / 2
     end
-
     startup_animation(world, entities, player1, player2)
     next
   end
 
-  # Death logic
   if SINGLE_PLAYER
     if player1[:downed]
       death_animation(world, entities, player1, player2)
